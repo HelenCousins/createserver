@@ -1,0 +1,263 @@
+#!/bin/bash
+
+#this is a script to make an openstack server on both a user network and a lustre provider network, such that with the correct image it can come up with secure
+#lustre mounted
+
+usage()
+{
+  echo "usage: createlusserv [options] [arguments]"
+  echo "where:"
+  echo "    -h --help			display this help and exit"
+  echo "    -n --net net		your OS network, please provide a network ID or name; if not provided you will be prompted"
+  echo "    -l --lnet lnet		your LNet network, please provide a network ID or name; if not provided you will be prompted"
+  echo "    -s --sec secgroup		a Security group you wish to apply (optionally repeat this option for additional groups), please provide the ID(s) or name(s)"
+  echo "    -f --flavour flavour	the flavour you wish to use, please provide an ID or name; if not provided you will be prompted"
+  echo "    -i --image image		the image you wish to use, please provide an ID or name; if not provided you will be prompted"
+  echo "    -k --key key		the keypair you wish to use, please provide the name; if not provided you will be prompted"
+  echo "    -a --name name		the name you want your server to have, if not provided you will be prompted"
+  echo "    -c --cred credentials	the location of your openstack credentials, you must provide this or include it in a file provided with -v or source your credentials first"
+  echo "    -v --var file		file containing these variables, try -v -h for help on this"
+  echo "    -m --makev filename		make a file of name filename to use with -v, you must also provide credentials with -c"
+  echo "only the security group option can usefully be repeated, repeating other options (including both in a file and on the command line) will result in only the last provided option being used"
+  echo "names or IDs can be used to identify openstack networks etc. unless your names are not unique, in which case the creation will fail"
+
+  if [ "$1" ]; then exit "$1"; else exit 0; fi
+}
+
+makevarfile=0
+
+options=$(getopt -o n:l:s:f:i:k:a:c:v:hm: --long help,net:,lnet:,sec:,image:,key:,name:,cred:,var:,flavour:,flavor:,makev: -- "$@")
+[ $? -eq 0 ] || {
+    echo "Incorrect options provided"
+    usage 1
+}
+set -e
+set -o pipefail
+
+eval set -- "$options"
+mysecg=()
+while true; do
+    case "$1" in
+    -h|--help )
+      usage
+      ;;
+    -m|--makev )
+      shift
+      makevarfile=1
+      vfile="$1"
+      if [ -e "$vfile" ];
+      then
+        echo "file $vfile already exists, will not overwrite"
+        exit 1
+      fi
+      ;;
+    -n|--net )
+      shift
+      mynet="$1"
+      ;;
+    -l|--lnet )
+      shift
+      lnet="$1"
+      ;;
+    -s|--sec )
+      shift
+      mysecg+=( "$1" )
+      ;;
+    -f|--flavour|--flavor )
+      shift
+      myflav="$1"
+      ;;
+    -i|--image )
+      shift
+      myimage="$1"
+      ;;
+    -k|--key )
+      shift
+      mykey="$1"
+      ;;
+    -a|--name )
+      shift
+      srvname="$1"
+      ;;
+    -c|--cred )
+      shift
+      cred="$1"
+      ;;
+    -v|--var )
+      shift
+      file="$1"
+      if [[ "$file" == "-h" ]]; then
+        echo "provide the location of a file containing the variables you need.  Mine looks like:"
+        echo "srvname=NAME"
+        echo "mynet=NET_ID"
+        echo "lnet=LUS_NET_ID"
+        echo "mysecg=( SEC_GRP_1_ID SEC_GRP_2_ID )"
+        echo "myflav=FLAVOUR_ID"
+        echo "myimage=IMAGE_ID"
+        echo "mykey=KEYPAIR_NAME"
+        echo "cred=~/path/to/creds"
+        echo "fill in your details"
+        echo "use -m to make such a file by answering questions"
+        echo "you can provide a subset of these options in this file and some on the command line"
+        exit 0
+      else
+        if [ -e "$file" ];
+        then
+          source "$file"
+        else
+          echo "$file does not exist, can not source variables"
+        fi
+      fi
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      echo "Internal error!" ;
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$OS_PASSWORD" ];
+then
+  if [ -z "$cred" ] ;
+  then
+    echo "you must provide the location  of your OS credentials with -c or in a file of variables provided with -v or source them yourself first"
+    usage 1
+  fi
+  if [ -e "$cred" ] ;
+  then
+    source "$cred"
+  else
+    echo "can not source $cred because it does not exist"
+  fi
+fi
+
+if [ -z "$mynet" ] ;
+then
+  openstack network list -c ID -c Name
+
+  while [ -z "$mynet" ] ; do
+    read -p "provide a network (ID or name) to put your machine on, not a lustre network: "  mynet
+  done
+fi
+
+if [ -z "$lnet" ] ;
+then
+  openstack network list -c ID -c Name 
+
+  while [ -z "$lnet" ] ; do
+    read -p "provide a lustre network ID or name: " lnet
+  done
+fi
+
+if [ -z "$mysecg" ] ;
+then
+  openstack security group list
+
+  read -p "you can provide a security group ID or name here, you can also add more later, just press enter to not add any: " temp
+  mysecg+=( "$temp" )
+fi
+
+if [ -z "$myflav" ] ;
+then
+  openstack flavor list
+
+  while [ -z "$myflav" ] ; do
+    read -p "provide a flavour ID or name: " myflav
+  done
+fi
+
+if [ -z "$myimage" ] ;
+then
+  openstack image list | grep lus
+
+  while [ -z "$myimage" ] ; do
+    read -p "provide a image ID or name (needs lustre): "  myimage
+  done
+fi
+
+if [ -z "$mykey" ] ;
+then
+  openstack keypair list
+
+  while [ -z "$mykey" ] ; do
+    read -p "provide a keypair name: " mykey
+  done
+fi
+
+while [ -z "$srvname" ] ;
+do
+  read -p "provide a name for your server: " srvname
+done
+
+p1name="${srvname}p1"
+p2name="${srvname}p2"
+
+if [ "$makevarfile" = 1 ];
+then
+  echo "variables will be written to $vfile"
+
+  echo "srvname=$srvname" > "$vfile"
+  echo "mynet=$mynet" >> "$vfile"
+  echo "lnet=$lnet" >> "$vfile"
+  echo "mysecg=( $mysecg ) # it's a space seperated list" >> "$vfile"
+  echo "myflav=$myflav" >> "$vfile"
+  echo "myimage=$myimage" >> "$vfile"
+  echo "mykey=$mykey" >> "$vfile"
+  if [ ! -z "$cred" ];
+  then
+    echo "cred=$cred" >> "$vfile"
+  fi
+
+  exit 0
+fi
+
+sg=""
+for c in ${mysecg[@]}; do
+  sg="$sg --security-group $c "
+done
+
+cmd="openstack port create --network  $mynet $sg -f json $p1name"
+
+port1id=$( $cmd | jq -r .id)
+
+port2id=$(openstack port create --network "$lnet" --no-security-group "$p2name" -f json | jq -r .id)
+
+servid=$(openstack server create  --config-drive True --flavor "$myflav" --image "$myimage" --port "$port1id" --port "$port2id" --key-name "$mykey" -f json "$srvname" | jq -r .id)
+
+if [ $(openstack floating ip list -c "Floating IP Address" -c "Port" -f json | jq -r '[.[]| select(.Port == null)] | .[]."Floating IP Address"' | wc -l) -eq 0 ]
+then
+  ip=$(openstack floating ip create public -f json | jq -r .floating_ip_address)
+else
+  ip=$(openstack floating ip list -c "Floating IP Address" -c "Port" -f json | jq -r '[.[]| select(.Port == null)] | .[0]."Floating IP Address"')
+fi
+
+openstack floating ip set --port "$port1id" "$ip"
+
+while [ ! $(openstack server show $servid  -f json | jq -r .status) = 'ACTIVE' ]
+do
+  echo 'provisioning'
+  sleep 5
+done
+
+
+echo "to edit security groups on your server you need to edit the port, the procedure is as follows"
+echo "list security groups:"
+echo "openstack security group list"
+echo "choose one and do:"
+echo "SECGROUPID=the-id-you-chose"
+echo "and then:"
+echo 'openstack port set --security-group  $SECGROUPID ' "$port1id"
+echo "you may repeat as often as desired"
+echo ""
+echo "the IP of your server is:"
+echo "$ip"
+
+
+
+
+

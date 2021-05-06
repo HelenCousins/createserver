@@ -1,0 +1,78 @@
+#!/bin/bash
+
+usage()
+{
+  echo "useage: deletelusserv [options] [arguments]"
+  echo "where:"
+  echo "    -h --help		display this help and exit"
+  echo "    -i --ip ip		provide the floating ip of the server to delete, if not provided you will be prompted"
+  echo "    -c --cred credentials	the location of your openstack credentials, you must provide this or include it in a file provided with -v or source your credentials first"
+  echo "    -v --var file   	file containing these variables"
+  echo "command line options will override variables provided through -v"
+
+  if [ "$1" ]; then exit "$1"; else exit 0; fi
+}
+
+
+options=$(getopt -o i:c:v:h --long help,ip:,cred:,var: -- "$@")
+[ $? -eq 0 ] || {
+    echo "Incorrect options provided"
+    usage 1
+}
+#set -e
+#set -o pipefail
+
+eval set -- "$options"
+while true; do
+    case "$1" in
+    -h | --help )
+      usage
+      ;;
+    -i | --ip)
+      shift
+      ip="$1"
+      ;;
+    -c | --cred)
+       shift
+       cred="$1"
+       ;;
+    -v| --var)
+       shift
+       . "$1"
+       ;;
+    --)
+        shift
+        break
+        ;;
+  esac
+  shift
+done
+
+if [ -z "$OS_PASSWORD" ];
+then
+  if [ -z "$cred" ] ;
+  then
+    echo "you must provide the location (full path) of your OS credentials with -c or in a file of variables provided with -v or source them yourseulf first"
+    usage 1
+  fi
+
+  source "$cred"
+fi
+
+if [ -z "$ip" ]
+then
+  openstack server list  -c Networks -c Name
+
+  echo "provide the floating ip"
+  read ip
+fi
+
+port1id=$(openstack floating ip show "$ip" -f json | jq -r .port_id)
+deviceid=$(openstack port show "$port1id"  -f json | jq -r .device_id)
+
+
+for p in $(openstack port list --device-id "$deviceid" -f json | jq -r .[].ID); do openstack port delete "$p"; done
+openstack server delete "$deviceid"
+openstack floating ip delete "$ip"
+
+

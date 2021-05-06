@@ -1,0 +1,8 @@
+srvname=NAME
+mynet=NET_ID
+lnet=LUS_NET_ID
+mysecg=( SEC_GRP_1_ID SEC_GRP_2_ID )
+myflav=FLAVOUR_ID
+myimage=IMAGE_ID
+mykey=KEYPAIR_NAME
+
